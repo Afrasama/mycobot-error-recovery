@@ -12,7 +12,7 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 
 URDF_PATH = os.path.join(BASE_DIR, "urdf", "mycobot_320.urdf")
 
-print("Images will be saved in:", SAVE_DIR)
+print("images will be saved in:", SAVE_DIR)
 
 # ---------------- CONNECT ----------------
 p.connect(p.GUI)
@@ -33,20 +33,20 @@ for j in range(p.getNumJoints(robot)):
     p.changeDynamics(robot,j,linearDamping=0.04,angularDamping=0.04)
 
 # ---------------- FIND END EFFECTOR ----------------
-ee_index = None
+ee_index=None
 for i in range(p.getNumJoints(robot)):
     if p.getJointInfo(robot,i)[12].decode()=="link6":
-        ee_index = i
+        ee_index=i
         break
 
 if ee_index is None:
-    raise ValueError("End effector 'link6' not found in URDF")
+    raise ValueError("link6 not found")
 
-print("end effector index:", ee_index)
+print("end effector index:",ee_index)
 
 # ---------------- SIMPLE GRIPPER ----------------
-gripper = p.createMultiBody(
-    baseMass=0.0,
+gripper=p.createMultiBody(
+    baseMass=0.1,
     baseCollisionShapeIndex=p.createCollisionShape(
         p.GEOM_BOX,halfExtents=[0.02,0.02,0.01]),
     baseVisualShapeIndex=p.createVisualShape(
@@ -58,49 +58,56 @@ p.createConstraint(robot,ee_index,gripper,-1,
                    p.JOINT_FIXED,[0,0,0],[0,0,0.04],[0,0,0])
 
 # ---------------- CUBE ----------------
-cube = p.loadURDF("cube_small.urdf",[0.3,0.1,0.02])
+cube=p.loadURDF("cube_small.urdf",[0.3,0.1,0.02])
 p.changeDynamics(cube,-1,mass=0.2,lateralFriction=1.2)
 
-constraint_id = None
+constraint_id=None
 
-# ---------------- SLIDERS ----------------
-x_slider = p.addUserDebugParameter("X",-0.4,0.4,0.30)
-y_slider = p.addUserDebugParameter("Y",-0.4,0.4,0.10)
-z_slider = p.addUserDebugParameter("Z",0.02,0.5,0.20)
+# ============================================================
+# ⭐ properly positioned calibrated camera (stable version)
+# ============================================================
+def get_ee_camera():
 
-current_target = [0.30,0.10,0.20]
+    width=320
+    height=240
 
-# ---------------- STATE ----------------
-state="manual"
-timer=0
-stable_counter=0
+    # end-effector position
+    link_state=p.getLinkState(robot,ee_index)
+    ee_pos=link_state[0]
 
-failure_data={
-    "type":None,
-    "retry_count":0,
-    "ee_position":None
-}
+    # cube position (camera always aims here)
+    cube_pos,_=p.getBasePositionAndOrientation(cube)
 
-# ---------------- CAMERA CAPTURE ----------------
-def capture_failure_image():
+    # --- calibrated camera mount near gripper ---
+    cam_pos=[
+        ee_pos[0]-0.05,   # slightly behind gripper
+        ee_pos[1],
+        ee_pos[2]+0.06    # slightly above
+    ]
 
-    width=640
-    height=480
+    # camera always looks at cube
+    target_pos=[
+        cube_pos[0],
+        cube_pos[1],
+        cube_pos[2]+0.02
+    ]
 
-    viewMatrix = p.computeViewMatrix(
-        cameraEyePosition=[0.6,0.6,0.6],
-        cameraTargetPosition=[0.3,0.1,0],
-        cameraUpVector=[0,0,1]
+    up_vec=[0,0,1]
+
+    viewMatrix=p.computeViewMatrix(
+        cameraEyePosition=cam_pos,
+        cameraTargetPosition=target_pos,
+        cameraUpVector=up_vec
     )
 
-    projectionMatrix = p.computeProjectionMatrixFOV(
-        fov=60,
+    projectionMatrix=p.computeProjectionMatrixFOV(
+        fov=75,
         aspect=width/height,
-        nearVal=0.01,
+        nearVal=0.02,
         farVal=2
     )
 
-    _,_,rgb,_,_ = p.getCameraImage(
+    _,_,rgb,_,_=p.getCameraImage(
         width,
         height,
         viewMatrix=viewMatrix,
@@ -108,16 +115,31 @@ def capture_failure_image():
         renderer=p.ER_BULLET_HARDWARE_OPENGL
     )
 
-    rgb_array=np.reshape(rgb,(height,width,4))
-    rgb_array=rgb_array[:,:,:3].astype(np.uint8)
-    rgb_array=np.flip(rgb_array,axis=0)
+    img=np.reshape(rgb,(height,width,4))[:,:,:3]
+    img=np.flip(img,0).astype(np.uint8)
 
-    file_name=f"failure_{failure_data['retry_count']}.png"
-    save_path=os.path.join(SAVE_DIR,file_name)
+    return img
 
-    cv2.imwrite(save_path,rgb_array)
+# ---------------- SAVE FAILURE IMAGE ----------------
+def capture_failure_image(tag):
+    img=get_ee_camera()
+    path=os.path.join(SAVE_DIR,f"{tag}_{int(time.time())}.png")
+    cv2.imwrite(path,img)
+    print("saved:",path)
 
-    print(f"📸 failure image saved → {save_path}")
+# ---------------- SLIDERS ----------------
+x_slider=p.addUserDebugParameter("X",-0.4,0.4,0.30)
+y_slider=p.addUserDebugParameter("Y",-0.4,0.4,0.10)
+z_slider=p.addUserDebugParameter("Z",0.02,0.5,0.20)
+
+current_target=[0.30,0.10,0.20]
+
+retry_offset=[0,0,0]
+retry_count=0
+
+state="manual"
+timer=0
+stable_counter=0
 
 print("\nSPACE = grab / release cube\n")
 
@@ -126,18 +148,20 @@ while p.isConnected():
 
     timer+=1
 
-    # ----- read sliders -----
+    # ⭐ live camera window
+    cam_img=get_ee_camera()
+    cv2.imshow("EE Camera View",cam_img)
+    cv2.waitKey(1)
+
     target=[
-        p.readUserDebugParameter(x_slider),
-        p.readUserDebugParameter(y_slider),
-        p.readUserDebugParameter(z_slider)
+        p.readUserDebugParameter(x_slider)+retry_offset[0],
+        p.readUserDebugParameter(y_slider)+retry_offset[1],
+        p.readUserDebugParameter(z_slider)+retry_offset[2]
     ]
 
-    # smooth movement
     for i in range(3):
         current_target[i]+= (target[i]-current_target[i])*0.08
 
-    # ----- IK -----
     joint_angles=p.calculateInverseKinematics(
         robot,
         ee_index,
@@ -145,37 +169,29 @@ while p.isConnected():
         maxNumIterations=120
     )
 
-    # ⭐ FIXED IK MOTOR INDEXING
-    idx=0
     for j in range(p.getNumJoints(robot)):
         if p.getJointInfo(robot,j)[2]==p.JOINT_REVOLUTE:
             p.setJointMotorControl2(
-                robot,
-                j,
-                p.POSITION_CONTROL,
-                targetPosition=joint_angles[idx],
+                robot,j,p.POSITION_CONTROL,
+                targetPosition=joint_angles[j],
                 force=120,
                 positionGain=0.03,
                 velocityGain=0.3
             )
-            idx+=1
 
-    # ----- SPACEBAR GRAB/RELEASE -----
     keys=p.getKeyboardEvents()
 
     if ord(' ') in keys and keys[ord(' ')] & p.KEY_WAS_TRIGGERED:
 
         if constraint_id is None:
+
             grip_pos,_=p.getBasePositionAndOrientation(gripper)
             cube_pos,_=p.getBasePositionAndOrientation(cube)
 
-            dx=grip_pos[0]-cube_pos[0]
-            dy=grip_pos[1]-cube_pos[1]
-            dz=grip_pos[2]-cube_pos[2]
-            dist=(dx*dx+dy*dy+dz*dz)**0.5
+            dist=np.linalg.norm(np.array(grip_pos)-np.array(cube_pos))
 
             if dist<0.07:
-                print("✔ grabbed cube")
+                print("grabbed cube")
                 constraint_id=p.createConstraint(
                     gripper,-1,cube,-1,
                     p.JOINT_FIXED,[0,0,0],[0,0,0],[0,0,0]
@@ -190,12 +206,11 @@ while p.isConnected():
             timer=0
             stable_counter=0
 
-    # ----- FAILURE CHECK -----
     if state=="checking":
 
         cube_pos,_=p.getBasePositionAndOrientation(cube)
         lin_vel,_=p.getBaseVelocity(cube)
-        speed=abs(lin_vel[0])+abs(lin_vel[1])+abs(lin_vel[2])
+        speed=sum(abs(v) for v in lin_vel)
 
         if cube_pos[2]<0.04 and speed<0.01:
             stable_counter+=1
@@ -203,24 +218,24 @@ while p.isConnected():
             stable_counter=0
 
         if stable_counter>120:
-            print("✔ placement success")
+            print("placement success")
+            retry_offset=[0,0,0]
             state="manual"
 
         elif timer>240:
-            print("❌ placement failed")
+            print("placement failed")
+            capture_failure_image("placement_fail")
 
-            ee_pos=p.getLinkState(robot,ee_index)[0]
-            failure_data["type"]="placement_fail"
-            failure_data["retry_count"]+=1
-            failure_data["ee_position"]=ee_pos
+            retry_count+=1
+            retry_offset[0]+=np.random.uniform(-0.02,0.02)
+            retry_offset[1]+=np.random.uniform(-0.02,0.02)
+            retry_offset[2]+=0.01
 
-            print("failure data:",failure_data)
-
-            capture_failure_image()
-
+            print("retry offset:",retry_offset)
             state="manual"
 
     p.stepSimulation()
     time.sleep(1/240)
 
 p.disconnect()
+cv2.destroyAllWindows()
